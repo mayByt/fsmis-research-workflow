@@ -1,0 +1,5 @@
+pypdf==6.21.2
+pypdfium2==5.14.0
+PyYAML==6.0.3
+Pillow==13.0.0
+fonttools==4.67.0

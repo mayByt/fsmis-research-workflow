@@ -1,0 +1,8 @@
+# Copy to config.toml. Relative paths resolve from the config file's directory.
+[paths]
+vault_root = "./ResearchVault"
+# Optional: custom Zotero data directory. Default: ~/Zotero
+zotero_data_dir = ""
+
+[zotero]
+api_url = "http://localhost:23119/api/users/0"
