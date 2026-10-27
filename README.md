@@ -15,9 +15,11 @@
 
 - [设计思路与职责分工](#设计思路与职责分工)
 - [安装与第一篇论文入库](#安装与第一篇论文入库)
+- [全文、页面缓存与精选图](#全文页面缓存与精选图)
 - [日常使用示例](#日常使用示例)
 - [如何保护个人思考](#如何保护个人思考)
 - [目录、配置与 Skills](#目录配置与-skills)
+- [授权诊断：Operation not permitted](#codex-中出现-operation-not-permitted)
 - [常见问题](#常见问题)
 - [验证、限制与开源范围](#验证限制与开源范围)
 
@@ -37,7 +39,7 @@
 ```mermaid
 flowchart LR
   Z[Zotero：文献与原 PDF] --> A[Local API：核对条目和附件]
-  A --> F[逐页文本与页面图像]
+  A --> F[长期逐页文本；按需页面缓存与精选图]
   F --> C[Codex：初筛或精读]
   C --> N[Obsidian：同一篇笔记持续更新]
   N --> B[FSMIS 迁移简评]
@@ -158,6 +160,7 @@ python tools/install.py --vault "$env:USERPROFILE/Research/ResearchVault"
 在 Zotero 设置的 **Advanced / 高级** 中，允许本机其他应用与 Zotero 通信。保持 Zotero 开启，然后在代码仓库终端执行：
 
 ```sh
+python tools/workflow.py doctor
 python tools/workflow.py list
 python tools/workflow.py list --query "论文题名中的关键词"
 ```
@@ -188,7 +191,7 @@ python tools/workflow.py inspect ABCD1234
 python tools/workflow.py inspect ABCD1234 --pdf-key EFGH5678
 ```
 
-`list`、`inspect` 不需要 Vault 参数。当前只支持本机个人库 `/api/users/0`，不支持 Zotero 群组库。
+`doctor`、`list`、`inspect` 不需要 Vault 参数。当前只支持本机个人库 `/api/users/0`，不支持 Zotero 群组库。
 
 ### 4. 先跑通脚本入库和检查
 
@@ -213,11 +216,38 @@ python tools/refresh_index.py --vault "/absolute/path/to/ResearchVault"
 
 - `02vault/<collection>/`：论文笔记，初始 `reading_status: inbox`。
 - `03fulltext/<collection>/<zotero_key>.md`：逐页文本与物理页号。
-- 同目录 `images/<zotero_key>/`：每一页对应一张 PNG。
+- 同目录 `images/<zotero_key>/`：仅存放精选保留的页面；首次入库可没有此目录。
+- `_staging/page-cache/`：按需渲染的临时页面，不写入笔记的长期链接。
 - 笔记中的全文链接、全文中的笔记链接，以及 Zotero 原 PDF 入口可打开。
 - `02vault/_index/文献索引.md`：刷新后生成的索引。
 
 再次运行同一条 `ingest`，应返回 `REUSED`；这可确认基本去重流程正常。
+
+### 全文、页面缓存与精选图
+
+全文 Markdown 是便于检索和追溯的长期文本档案；原始排版仍以 Zotero PDF 为准。新入库不再为所有页面生成 PNG，避免文献库增长时累积低使用率图片。
+
+```sh
+# 仅渲染需要核验的物理 PDF 页，输出缓存绝对路径
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" render ABCD1234 --pages 3,5-7
+# 重要图表所在页面精选保留，全文自动建立稳定图片链接
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" render ABCD1234 --pages 3 --keep
+# 预览超过 30 天未使用的缓存；加 --apply 才实际删除
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" cache-prune --days 30
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" cache-prune --days 30 --apply
+```
+
+缓存按 `zotero_key/source_sha256/物理页号` 存在 `_staging/page-cache/`；每次使用更新时间。精选 PNG 保存在原全文同目录 `images/<key>/page-XXX.png`，`retained_pages` 登记长期保留页。**嵌入笔记前先用 `--keep`，不要链接临时缓存。**源 PDF 的附件身份、内容散列或页数变化时停止渲染，防止复用错误页面。没有缓存不影响全文校验，精选图和实际图片链接缺失仍会报错。工具输出的是整页，尚不自动裁剪 Figure。
+
+已有全页 PNG 的 Vault 可先预览迁移：
+
+```sh
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" migrate-images
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" migrate-images --apply --backup-dir "/absolute/path/to/backups"
+python tools/workflow.py --vault "/absolute/path/to/ResearchVault" validate
+```
+
+迁移前备份原始全文和 PNG；扫描 Vault 内 Markdown 的 Wiki、Markdown 和 HTML 图片链接，所有已引用页面保持原位置，其余生成页面转入缓存，并移除对应的全文自动嵌入。逐页文本、页标题、Zotero 页面链接和论文笔记保持原样。失败会回滚，重复运行不会重复迁移。迁移时暂停外部编辑；迁移后可预览 `cache-prune --days 0`，确认后加 `--apply` 立即清理未引用缓存。备份 ZIP 不自动删除；未指定备份目录时存于 Vault 的 `_staging/backups/`。不解析任意插件的私有引用格式，如有仅存于插件数据中的引用，先在 Markdown 中建立链接再迁移。
 
 ### 5. 在 Vault 中启动 Codex，完成第一次阅读
 
@@ -321,14 +351,14 @@ ResearchVault/
 ├── 03fulltext/
 │   └── <collection>/
 │       ├── <zotero_key>.md
-│       └── images/<zotero_key>/page-001.png
+│       └── images/<zotero_key>/page-003.png # 按需精选保留
 ├── 04projects/ideas/          # 明确要求后生成创新方案
 ├── 05meetings/                # 按需保存组会素材
 ├── 06assets/
 ├── 模板/
 │   ├── 论文精读模板.md
 │   └── 领域模块/
-└── _staging/                  # 元数据、锁、更新备份与安装记录
+└── _staging/                  # 元数据、页面缓存、锁、更新备份与安装记录
 ```
 
 稳定身份和双向路径字段为 `type: literature-note`、`zotero_key`、`pdf_key`、`note_path`、`fulltext_path`。Vault 内链接使用相对路径。完整字段见 [Schema](docs/SCHEMA.md)，不是所有 Knowledge 页都使用文献笔记 Schema。
@@ -371,7 +401,7 @@ python tools/refresh_index.py
 |---|---|
 | `research-vault-ingest-orchestrator` | 指定论文的入库、初筛或完整精读总流程 |
 | `zotero-data-fetcher` | 核对父条目、附件、批注与本机 PDF |
-| `zotero-fulltext-archiver` | 创建或复用原文和页面图像 |
+| `zotero-fulltext-archiver` | 长期全文、按需页面缓存、精选图与迁移 |
 | `zotero-analytical-writer` | 按主模板、领域模块写作和更新 |
 | `research-vault-literature-retrieval` | 从已有笔记检索，再追踪全文核验 |
 | `research-vault-knowledge-maintainer` | 有证据时维护跨论文主题、关系和争议 |
@@ -401,10 +431,28 @@ python tools/install.py --vault "/absolute/path/to/ResearchVault" --update-manag
 
 ## 常见问题
 
+### Codex 中出现 Operation not permitted
+
+先运行只读检查：
+
+```sh
+python tools/workflow.py doctor
+```
+
+- `READY`：已连通本机个人库 API；不表示完成论文分析。
+- `LOCAL_API_PERMISSION_DENIED`：连接在收到 HTTP 响应前被宿主/系统拒绝。已安装的 Skills 会指导 Codex 对同一命令请求正常权限审批并重试一次；在同一沙箱中重复命令不会改变权限。
+- `ZOTERO_API_FORBIDDEN`：收到 HTTP 403，检查 Zotero 的本机通信设置。
+- `ZOTERO_API_CONNECTION_REFUSED`：检查 Zotero 是否已运行，以及 API 端口是否正确。
+- `ZOTERO_API_TIMEOUT`：检查服务响应及网络策略；超时本身不能证明权限被拒绝。
+
+若当前会话禁止审批，Codex 应报告这个限制。CLI 可通过 `/permissions` 查看模式，桌面端可查看输入框下方的权限控制；选择是否允许正常审批由用户决定。本包不会改写全局配置，也不会要求关闭沙箱。普通系统终端中的同一条 doctor 命令可用于对照诊断，但终端成功不会自动授予 Codex 会话权限。参见 [OpenAI 官方权限说明](https://learn.chatgpt.com/docs/sandboxing)。
+
+更新已有安装时，需要将改过的 Skills 更新到 Vault；审查后使用本页的 `install.py --update-managed` 流程。旧会话可以显式重读 AGENTS.md 和对应 SKILL.md。
+
 | 现象 | 检查与处理 |
 |---|---|
 | `ModuleNotFoundError` | 当前 Python 可能不是 `.venv` 的解释器；用虚拟环境 Python 重新安装 requirements，再运行工具 |
-| Local API 连接失败或 403 | 确认 Zotero 已开启、本机通信已允许；检查端口和配置中的 loopback API URL |
+| Local API 报错 | 先运行 doctor，按错误码区分权限拒绝、HTTP 403、端口拒绝和超时，见上文 |
 | `list` 返回 `[]` | 当前个人库或关键词没有匹配；先尝试不带 query 的 list，确认文献位于个人库 |
 | PDF 数量不是 1 | 确认父条目下有实际 PDF；多个附件时用 inspect/ingest 的 `--pdf-key` 明确选择 |
 | PDF 本地文件不可用 | 在 Zotero 打开附件确认已下载；检查自定义数据目录、linked attachment 路径和云盘状态 |
@@ -436,9 +484,9 @@ python -m compileall -q tools tests
 ### 当前能力边界
 
 - 仅支持 Zotero 本机个人库；多集合条目使用第一个集合，尚不支持群组库与集合映射自定义。
-- 归档保留逐页文本和整页 PNG，未自动分割 Figure、恢复 LaTeX、OCR 或核验作者实现。
+- 归档长期保留逐页文本；仅按需渲染和精选保留整页 PNG，未自动分割 Figure、恢复 LaTeX、OCR 或核验作者实现。
 - 源 PDF/附件变化、缺失全文和旧笔记迁移需要定向审查；没有自动合并或强制刷新功能。
-- 逐页 PNG 会增加磁盘用量；可将 Vault 放在自己管理的存储位置，保持原文链接一致。
+- 缓存可按使用时间清理；精选图与迁移备份仍占空间。清理不是定时自动任务，PDF 仍须在 Zotero 中可用以便重新渲染。
 - 更新使用备份、锁及原子替换；不提供整个 Vault 的事务保证，也无法阻止外部编辑器同时写文件。
 - 本包不内置模型服务、向量数据库、训练系统或成品 PPT 生成器。需要核对作者代码时，由当前会话按实际可访问资料开展，不自动执行作者脚本。
 

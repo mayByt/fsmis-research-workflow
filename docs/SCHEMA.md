@@ -22,3 +22,8 @@
 正文固定为 00–10 节；00–09 在 `AUTO:BEGIN/END` 注释之间，10 在 `HUMAN:BEGIN/END` 之间。保留标记顺序，避免重叠。更新会保留自动区之外的正文，并重写 YAML 的格式。
 
 全文类型为 `literature-fulltext`，有相同的身份和双向路径，额外记录 `source_sha256`、`page_count`、`source_type`、`page_mapping: physical_pdf_1_based`。文本和图片的存在性检查不能代替公式、页码语义与论文结论核验。
+
+
+新全文使用 `image_policy: on_demand`、`source_type: pypdf` 和 `retained_pages: []`。`retained_pages` 是唯一且合法的 PDF 物理页整数列表；列出的 `images/<zotero_key>/page-XXX.png` 必须存在。全文页标题须按 1..page_count 连续排列；缓存缺失允许，所有实际图片链接仍须有效。缺少 image_policy 的旧归档沿用每页一图校验，使用 migrate-images 带备份迁移。
+
+按需缓存不进入全文的稳定链接：`_staging/page-cache/<zotero_key>/<source_sha256>/page-XXX.png`。源 SHA-256 参与缓存路径，渲染前核对实际 PDF；缓存使用时间记录在文件修改时间，cache-prune 默认预览超过 30 天未使用的未引用缓存，--apply 才删除。精选 PNG 永远不属于缓存清理范围。

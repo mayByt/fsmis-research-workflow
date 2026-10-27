@@ -13,3 +13,8 @@ description: "使用通用 V2 模板和领域模块精读 FSMIS、医学分割�
 00–09 为 AUTO 区；把新内容保存到临时 Markdown（无保护标记），元数据为 JSON，用 update KEY --body <文件> --metadata <文件> 更新。第 10 节及其他人工区域不可覆盖。工具会备份；保护标记缺失或顺序异常先审查迁移。
 阅读完才将 reading_status 设为 skimmed 或 deep_read，reading_level 对应 skim 或 deep；深读不是训练复现。
 第 08 节始终短评：high/potential/low/uncertain、来源机制、FSMIS 对应问题、障碍和依据。普通阅读 transfer_mode=brief；只有明确要求创新设计才读取 fsmis-idea-lab 并保存 Idea。
+
+
+## 页面图像的按需核验
+
+逐页全文文本长期保留，PNG 不再全量常驻。需要核验 Figure、公式或表格时，按 zotero-fulltext-archiver 使用 `render KEY --pages <物理页>` 并实际查看返回图片。要在笔记中嵌入图片，先加 `--keep` 保存为精选图，再使用返回的 `03fulltext/.../images/<key>/page-XXX.png` 稳定路径；不要链接 `_staging/page-cache/`。旧笔记已引用图保留原位置。PNG 缓存缺失无需重建整篇全文；源 PDF 变化则停止复用并报告。全文无需每页都有 PNG，校验仍须检查所有精选图及实际链接。

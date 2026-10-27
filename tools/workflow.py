@@ -4,7 +4,11 @@ import argparse, datetime, hashlib, json, os, re, tempfile, urllib.request, urll
 from contextlib import contextmanager
 from settings import ROOT, vault_path, api_url, zotero_data_dir
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from local_api_errors import LocalAPIError
 import yaml
+import page_assets
+import sys
 DOMAINS=['fsmis','medical_segmentation','general_cv','survey_benchmark','other']
 ALLOWED={'theme','study_area','data_source','methodology','core_variable','key_finding','relevance','paper_domain','analysis_modules','method_tags','reading_status','reading_level','fsmis_relevance','transfer_mode'}
 def now():return datetime.datetime.now().astimezone().isoformat()
@@ -14,11 +18,22 @@ def key(s):
  return s
 def safe(s):return re.sub(r'[\\/:*?"<>|\[\]#^\x00-\x1f]','_',s).strip(' .')[:100] or '未分类'
 def api(path):
- # Ignore system proxies for this loopback-only API.
- req=urllib.request.Request(api_url()+path,headers={'Zotero-API-Version':'3'})
- with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=15) as r:
-  if urllib.parse.urlsplit(r.url).hostname not in {'localhost','127.0.0.1','::1'}:raise ValueError('Unexpected API redirect')
-  return json.load(r)
+ # No proxy, alternate transport, or in-script privilege escalation for loopback.
+ endpoint=api_url()+path
+ req=urllib.request.Request(endpoint,headers={'Zotero-API-Version':'3'})
+ try:
+  with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=15) as r:
+   if urllib.parse.urlsplit(r.url).hostname not in {'localhost','127.0.0.1','::1'}:raise ValueError('Unexpected API redirect')
+   return json.load(r)
+ except (HTTPError, URLError, OSError) as exc:
+  raise LocalAPIError(endpoint,exc) from exc
+
+def doctor():
+ # Read at most one item to check the actual personal-library API; no Vault writes.
+ sample=api('/items/top?limit=1')
+ if not isinstance(sample,list):raise ValueError('Expected Zotero array response')
+ return {'state':'READY','api_reachable':True,'endpoint':api_url(),'scope':'personal-library-read-only','vault_modified':False}
+
 def pages(path):
  result=[];start=0
  while True:
@@ -89,20 +104,16 @@ def _ingest(v,k,pdfkey=None):
  note=inside(v,nr);ft=inside(v,fr)
  if note.exists() or ft.exists():raise ValueError('目标已存在但未匹配唯一身份，停止覆盖')
  from pypdf import PdfReader
- import pypdfium2 as pdfium
  reader=PdfReader(pdf);texts=[p.extract_text() or '' for p in reader.pages]
  if not texts or any(len(t.strip())<30 for t in texts):raise ValueError('存在扫描/低文本页面，需 OCR 核验；未创建正式笔记')
  nd,body=split((v/'模板/论文精读模板.md').read_text(encoding='utf-8'))
  nd.update(title=d['title'],created=now()[:10],source=d.get('publicationTitle',d.get('proceedingsTitle','')),author='; '.join(c.get('name') or (c.get('firstName','')+' '+c.get('lastName','')).strip() for c in d.get('creators',[])),year=(re.search(r'\b(?:19|20)\d{2}\b',d.get('date','')) or [''])[0] or None,zotero_key=k,pdf_key=pk,doi=d.get('DOI',''),collection=col,note_path=nr,fulltext_path=fr,zotero_item=f'zotero://select/library/items/{k}',zotero_pdf=f'zotero://open-pdf/library/items/{pk}')
  body=body.replace('{{title}}',d['title']).replace('- 文献与全文入口：由入库工具填入。',f'- [Zotero 条目]({nd["zotero_item"]}) · [原 PDF]({nd["zotero_pdf"]}) · [[{fr[:-3]}|逐页全文]]')
  fd={x:nd[x] for x in ['title','zotero_key','pdf_key','doi','collection','note_path','fulltext_path','zotero_item','zotero_pdf']}
- fd.update(type='literature-fulltext',source_type='pypdf+page-render',source_sha256=digest,page_mapping='physical_pdf_1_based',page_count=len(texts),extraction_quality='text_extracted_visual_verification_required')
- image_dir=inside(v,f'03fulltext/{col}/images/{k}');image_dir.mkdir(parents=True,exist_ok=True)
- render=pdfium.PdfDocument(str(pdf));chunks=[f'# {d["title"]}\n\n[[{nr[:-3]}|精读笔记]]\n\n原文逐页提取；公式及表格请核对页面图像。页号为 PDF 物理页。\n']
+ fd.update(type='literature-fulltext',source_type='pypdf',image_policy='on_demand',retained_pages=[],source_sha256=digest,page_mapping='physical_pdf_1_based',page_count=len(texts),extraction_quality='text_extracted_visual_verification_required')
+ chunks=[f'# {d["title"]}\n\n[[{nr[:-3]}|精读笔记]]\n\n原文逐页提取；公式及表格请核对原 PDF 或按需渲染的页面。页号为 PDF 物理页。\n']
  for i,t in enumerate(texts,1):
-  name=f'page-{i:03}.png';page=render[i-1];bitmap=page.render(scale=1.5);bitmap.to_pil().save(image_dir/name);bitmap.close();page.close()
-  chunks.append(f'\n## PDF 第 {i} 页\n\n[在 Zotero 打开此页]({nd["zotero_pdf"]}?page={i})\n\n![PDF 第 {i} 页](images/{k}/{name})\n\n'+t+'\n')
- render.close()
+  chunks.append(f'\n## PDF 第 {i} 页\n\n[在 Zotero 打开此页]({nd["zotero_pdf"]}?page={i})\n\n'+t+'\n')
  atomic(ft,doc(fd,''.join(chunks)));atomic(note,doc(nd,body))
  atomic(inside(v,f'_staging/metadata/{k}.json'),json.dumps(info,ensure_ascii=False,indent=2))
  errors=validate(v)
@@ -153,13 +164,8 @@ def validate(v):
    fd,fb=split(ft.read_text(encoding='utf-8'))
    for f in ['zotero_key','pdf_key','note_path','fulltext_path']:
     if fd.get(f)!=d.get(f):raise ValueError(f+' 双向不匹配')
-   n=fd.get('page_count',0)
-   if not n or len(re.findall(r'^## PDF 第 \d+ 页$',fb,re.M))!=n:raise ValueError('全文缺页')
-   images=re.findall(r'!\[[^\]]*\]\(([^)]+)\)',fb)
-   if len(images)!=n:raise ValueError('页面图像数量不符')
-   for im in images:
-    ip=(ft.parent/im).resolve()
-    if not ip.is_relative_to(v.resolve()) or not ip.is_file():raise ValueError('图片缺失/越界')
+   page_assets.validate_assets(sys.modules[__name__],v,ft,fd,fb)
+   page_assets.check_links(sys.modules[__name__],v,p,b)
    for marker in ['<!-- AUTO:BEGIN -->','<!-- AUTO:END -->','<!-- HUMAN:BEGIN -->','<!-- HUMAN:END -->']:
     if b.count(marker)!=1:raise ValueError('保护标记不唯一')
   except Exception as e:errors.append(str(p)+': '+str(e))
@@ -189,15 +195,23 @@ def main():
  for c in ['inspect','ingest']:
   s=sub.add_parser(c);s.add_argument('key');s.add_argument('--pdf-key')
  s=sub.add_parser('update');s.add_argument('key');s.add_argument('--body',required=True);s.add_argument('--metadata')
- sub.add_parser('validate');a=parser.parse_args()
+ s=sub.add_parser('render');s.add_argument('key');s.add_argument('--pages',required=True);s.add_argument('--keep',action='store_true')
+ s=sub.add_parser('migrate-images');s.add_argument('--apply',action='store_true');s.add_argument('--backup-dir',type=Path)
+ s=sub.add_parser('cache-prune');s.add_argument('--days',type=int,default=30);s.add_argument('--apply',action='store_true')
+ sub.add_parser('doctor');sub.add_parser('validate');a=parser.parse_args()
  try:
-  if a.cmd=='list':result=[{'key':x['key'],'title':x['data'].get('title'),'type':x['data']['itemType']} for x in pages('/items/top?q='+urllib.parse.quote(a.query))]
+  if a.cmd=='doctor':result=doctor()
+  elif a.cmd=='list':result=[{'key':x['key'],'title':x['data'].get('title'),'type':x['data']['itemType']} for x in pages('/items/top?q='+urllib.parse.quote(a.query))]
   elif a.cmd=='inspect':result=inspect(a.key,a.pdf_key)
   elif a.cmd=='ingest':result=ingest(vault_path(a.vault),key(a.key),a.pdf_key)
+  elif a.cmd=='render':result=page_assets.render(sys.modules[__name__],vault_path(a.vault),key(a.key),a.pages,a.keep)
+  elif a.cmd=='migrate-images':result=page_assets.migrate(sys.modules[__name__],vault_path(a.vault),a.apply,a.backup_dir)
+  elif a.cmd=='cache-prune':result=page_assets.prune(sys.modules[__name__],vault_path(a.vault),a.days,a.apply)
   elif a.cmd=='update':result=update(vault_path(a.vault),a.key,a.body,a.metadata)
   else:
    errs=validate(vault_path(a.vault));result={'state':'FAIL' if errs else 'PASS','errors':errs}
    if errs:print(json.dumps(result,ensure_ascii=False,indent=2));return 1
   print(json.dumps(result,ensure_ascii=False,indent=2));return 0
+ except LocalAPIError as e:print(json.dumps(e.payload,ensure_ascii=False,indent=2));return 1
  except Exception as e:print(json.dumps({'state':'STOPPED','error':str(e)},ensure_ascii=False));return 1
 if __name__=='__main__':raise SystemExit(main())
